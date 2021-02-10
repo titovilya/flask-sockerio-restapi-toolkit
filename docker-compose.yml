@@ -1,0 +1,182 @@
+version: '3.7'
+services:
+  mysql:
+    container_name: mysql
+    image: mysql:8.0.19
+    restart: unless-stopped
+    environment:
+      MYSQL_DB: $MYSQL_DATABASE
+      MYSQL_USER: $MYSQL_USER
+      MYSQL_PASSWORD: $MYSQL_PASSWORD
+      MYSQL_ROOT_PASSWORD: $MYSQL_PASSWORD
+    ports:
+      - "${MYSQL_PORT}:${MYSQL_PORT}"
+    expose:
+      - $MYSQL_PORT
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - app-network
+
+      
+  nginx:
+    container_name: nginx
+    restart: unless-stopped
+    build: ./services/nginx
+    volumes:
+      # NGINX Config. Change between prod and dev
+      - ./services/nginx/nginx_dev.conf:/etc/nginx/dev.conf
+      # Dev Crts
+      - ./services/nginx/dev_crts/dev.crt:/etc/dev_crts/dev.crt
+      - ./services/nginx/dev_crts/dev.key:/etc/dev_crts/dev.key
+      # Prod Crts
+      - ./services/nginx/prod_crts/prod.crt:/etc/prod_crts/prod.crt
+      - ./services/nginx/prod_crts/prod.key:/etc/prod_crts/prod.key
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - mysql
+      - phpmyadmin
+      - api
+      - main_page
+      - admin_panel
+    networks:
+      - app-network
+
+
+  phpmyadmin:
+    container_name: phpmyadmin
+    image: phpmyadmin/phpmyadmin:latest
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: $MYSQL_PORT
+      PMA_ARBITRARY: 1
+      PMA_USER: $MYSQL_USER            # TODO remove before prod
+      PMA_PASSWORD: $MYSQL_PASSWORD    # TODO remove before prod
+    ports:
+      - "5004:80"
+    depends_on:
+      - mysql
+    networks:
+      - app-network
+
+
+  api:
+    container_name: api
+    build: ./services/api
+    # command: gunicorn -w 4 start:application -b 0.0.0.0:80    # Production start command
+    command: python start.py                                    # Dev start command
+    restart: unless-stopped    
+    environment:
+      FLASK_APP: start.py
+      DEBUG_MODE: $DEBUG_MODE
+      SQLALCHEMY_DATABASE_URI: '${MYSQL_DRIVER}://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:${MYSQL_PORT}/${MYSQL_DATABASE}'
+      SQLALCHEMY_TRACK_MODIFICATIONS: $SQLALCHEMY_TRACK_MODIFICATIONS
+    ports:
+      - "80"
+    volumes:
+      - ./services/api:/api
+    depends_on:
+      - mysql
+    networks:
+      - app-network
+
+
+  main_page:
+    container_name: main_page
+    build: ./services/main_page
+    # command: gunicorn --worker-class eventlet -w 9 start:app -b 0.0.0.0:80    # Production start command
+    command: python start.py                                                    # Dev start command
+    restart: unless-stopped
+    environment:
+      FLASK_APP: start.py
+      DEBUG_MODE: $DEBUG_MODE
+      SQLALCHEMY_DATABASE_URI: '${MYSQL_DRIVER}://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:${MYSQL_PORT}/${MYSQL_DATABASE}'
+      SQLALCHEMY_TRACK_MODIFICATIONS: $SQLALCHEMY_TRACK_MODIFICATIONS
+      CELERY_BROKER_URL: $CELERY_BROKER_URL
+      CELERY_RESULT_BACKEND: $CELERY_RESULT_BACKEND
+    ports:
+      - "80"
+      - "443"
+    volumes:
+      - ./services/main_page:/main_page
+    depends_on:
+      - api
+      - redis
+    links: 
+      - redis
+    networks:
+      - app-network
+
+
+  admin_panel:
+    container_name: admin_panel
+    build: ./services/admin_panel
+    command: python start.py
+    restart: unless-stopped
+    environment:
+      FLASK_APP: start.py
+      DEBUG_MODE: $DEBUG_MODE
+      SQLALCHEMY_DATABASE_URI: '${MYSQL_DRIVER}://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:${MYSQL_PORT}/${MYSQL_DATABASE}'
+      SQLALCHEMY_TRACK_MODIFICATIONS: $SQLALCHEMY_TRACK_MODIFICATIONS
+    expose:
+      - "8080"
+    volumes:
+      - ./services/admin_panel:/admin_panel
+    depends_on:
+      - api
+    networks:
+      - app-network
+
+
+  worker:
+    container_name: worker
+    build: ./services/celery-queue
+    command: celery -A tasks worker -E -B -l info
+    restart: unless-stopped
+    environment: 
+      SQLALCHEMY_DATABASE_URI: '${MYSQL_DRIVER}://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:${MYSQL_PORT}/${MYSQL_DATABASE}'
+    volumes:
+      - ./services/celery-queue:/celery-queue
+    depends_on:
+      - redis
+    links: 
+      - redis
+    networks:
+      - app-network
+
+  
+  flower:
+    container_name: flower
+    build: ./services/celery-queue
+    volumes:
+      - ./services/celery-queue:/celery-queue
+    entrypoint: flower
+    command: -A tasks --port=5554 --broker=redis://redis:6379/0
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - worker
+    ports:
+      - "5554:5554"
+    links: 
+      - redis
+      - worker
+    networks:
+      - app-network
+
+  redis:
+    container_name: redis
+    image: redis:6.0.8
+    networks:
+      - app-network
+
+volumes:
+  db-data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
